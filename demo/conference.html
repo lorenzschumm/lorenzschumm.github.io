@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Poster Session — A Conference Game</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;                       /* no rubber-band scroll on mobile */
+    background: #1b2330;
+    color: #e8edf4;
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+  p.hint { margin: 0; font-size: 13px; color: #9fb0c7; }
+  p.hint b { color: #cdd9ea; }
+  canvas {
+    background: #f2efe6;
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.45);
+    max-width: 100%;                        /* scale down to fit phone screens */
+    max-height: 82vh;
+    touch-action: none;                     /* we handle touches ourselves */
+  }
+  @media (max-width: 700px) {
+    h1 { font-size: 17px; }
+    p.hint { font-size: 11px; padding: 0 10px; text-align: center; }
+  }
+</style>
+</head>
+<body>
+  <h1>📋 Poster Session</h1>
+  <p class="hint" id="hint">
+    Move with <b>WASD</b> &nbsp;·&nbsp; <b>stand on a poster</b> to read it &nbsp;·&nbsp;
+    avoid the <b>organizers with bells</b> 🔔 herding you to the plenary
+  </p>
+  <canvas id="game" width="1100" height="760"></canvas>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width;
+const H = canvas.height;
+
+// ---- Tunable constants ---------------------------------------------------
+const PLAYER_SIZE   = 24;
+const PLAYER_SPEED  = 220;   // px/s
+const POSTER_W      = 30;
+const POSTER_H      = 38;
+const POSTER_COUNT  = 11;
+const READ_TIME     = 0.7;   // seconds you must linger on a poster to read it
+const ORG_RADIUS    = 16;
+const ORG_SPEED     = 150;   // px/s  (slower than player so escape is possible)
+const ORG_DETECT    = 150;   // chase when player is within this distance AND visible
+const MARGIN        = 40;    // keep things off the very edge
+const WALL_PAD      = 6;     // clearance kept between posters/spawns and walls
+const TRAIL_LIFE    = 0.32;  // seconds a movement after-image lingers
+const POP_LIFE      = 0.8;   // seconds a "+1" score pop lasts
+const COFFEE_MIN_INTERVAL = 12;  // min seconds between coffee spawns
+const COFFEE_MAX_INTERVAL = 22;  // max seconds between coffee spawns
+const COFFEE_LIFE   = 12;    // seconds a coffee waits before vanishing
+const COFFEE_R      = 13;    // coffee size / pickup radius
+const BOOST_TIME    = 4.5;   // seconds of speed boost per coffee
+const BOOST_MULT    = 1.6;   // speed multiplier while boosted
+const MAX_COFFEE    = 2;     // max coffees on the floor at once
+const COMBO_WINDOW  = 3.5;   // seconds to read the next poster before the combo lapses
+const COMBO_MAX     = 5;     // combo multiplier cap
+const STICK_RADIUS  = 55;    // px (client) drag for full-speed on the touch joystick
+const STICK_DEAD    = 6;     // px (client) dead zone before the joystick registers
+
+// ---- High score (persisted via localStorage) -----------------------------
+const HS_KEY = "posterSessionHighScore";
+function loadHighScore() {
+  try { return parseInt(localStorage.getItem(HS_KEY), 10) || 0; } catch (e) { return 0; }
+}
+function saveHighScore(v) {
+  try { localStorage.setItem(HS_KEY, String(v)); } catch (e) { /* storage unavailable */ }
+}
+let highScore = loadHighScore();
+
+const POSTER_COLORS = ["#e26d5c", "#5c8ae2", "#5cb185", "#d9a13b", "#9b6ec2", "#3fb0c2"];
+const POSTER_BADGES = ["ML", "AI", "Bio", "HCI", "NLP", "CV", "Sec", "DB", "OS", "Net", "Vis", "Eco"];
+
+// Booth-divider walls. A fresh random layout is generated each game
+// (see regenerateWalls); this hand-authored set is the fallback.
+const DEFAULT_WALLS = [
+  { x: 250, y: 120, w: 26, h: 200 },
+  { x: 250, y: 460, w: 26, h: 200 },
+  { x: 540, y:  70, w: 26, h: 250 },
+  { x: 540, y: 470, w: 26, h: 230 },
+  { x: 830, y: 120, w: 26, h: 200 },
+  { x: 830, y: 460, w: 26, h: 200 },
+  { x: 330, y: 360, w: 210, h: 26 },
+  { x: 640, y: 410, w: 220, h: 26 },
+];
+let WALLS = DEFAULT_WALLS.map(w => ({ ...w }));
+
+// ---- Input ---------------------------------------------------------------
+const keys = new Set();
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  keys.add(k);
+  if (k === "r" && !game.running) reset();
+  if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
+});
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+// ---- Touch input (phones): a floating on-screen joystick ------------------
+const isTouch = window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+
+// The joystick: appears wherever you first touch, steers as you drag from there.
+// All coordinates are in client (CSS) pixels; movement uses only the direction.
+const stick = { active: false, id: null, ox: 0, oy: 0, cx: 0, cy: 0 };
+
+function stickVector() {
+  if (!stick.active) return null;
+  const dx = stick.cx - stick.ox, dy = stick.cy - stick.oy;
+  const len = Math.hypot(dx, dy);
+  if (len < STICK_DEAD) return null;
+  const mag = Math.min(1, len / STICK_RADIUS);   // analog: partial drag = slower
+  return { x: (dx / len) * mag, y: (dy / len) * mag };
+}
+
+function onTouchStart(e) {
+  if (!game.running) { reset(); e.preventDefault(); return; }   // tap to restart
+  if (!stick.active) {
+    const t = e.changedTouches[0];
+    stick.active = true;
+    stick.id = t.identifier;
+    stick.ox = stick.cx = t.clientX;
+    stick.oy = stick.cy = t.clientY;
+  }
+  e.preventDefault();
+}
+function onTouchMove(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier === stick.id) { stick.cx = t.clientX; stick.cy = t.clientY; }
+  }
+  e.preventDefault();
+}
+function onTouchEnd(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier === stick.id) { stick.active = false; stick.id = null; }
+  }
+  e.preventDefault();
+}
+
+if (isTouch) {
+  canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", onTouchEnd, { passive: false });
+  document.getElementById("hint").innerHTML =
+    "<b>Drag anywhere</b> to move &nbsp;·&nbsp; <b>stand on a poster</b> to read it " +
+    "&nbsp;·&nbsp; avoid the <b>organizers</b> 🔔";
+}
+
+// ---- Geometry helpers ----------------------------------------------------
+function rand(min, max) { return min + Math.random() * (max - min); }
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+// Square (centred) hits any wall?
+function squareHitsWall(cx, cy, size) {
+  const h = size / 2;
+  return WALLS.some(w => rectsOverlap(cx - h, cy - h, size, size, w.x, w.y, w.w, w.h));
+}
+
+// Circle hits any wall? (closest-point test)
+function circleHitsWall(cx, cy, r) {
+  return WALLS.some(w => {
+    const nx = Math.max(w.x, Math.min(cx, w.x + w.w));
+    const ny = Math.max(w.y, Math.min(cy, w.y + w.h));
+    return dist(cx, cy, nx, ny) < r;
+  });
+}
+
+// Liang–Barsky: does the segment (x1,y1)->(x2,y2) touch the rectangle?
+function segHitsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
+  let t0 = 0, t1 = 1;
+  const dx = x2 - x1, dy = y2 - y1;
+  const p = [-dx, dx, -dy, dy];
+  const q = [x1 - rx, rx + rw - x1, y1 - ry, ry + rh - y1];
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i] < 0) return false;            // parallel and outside this slab
+    } else {
+      const r = q[i] / p[i];
+      if (p[i] < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+      else          { if (r < t0) return false; if (r < t1) t1 = r; }
+    }
+  }
+  return true;
+}
+
+// Clear line of sight between two points (no wall in the way)?
+function hasLineOfSight(x1, y1, x2, y2) {
+  return !WALLS.some(w => segHitsRect(x1, y1, x2, y2, w.x, w.y, w.w, w.h));
+}
+
+// A wander target the organizer can actually stand in.
+function freePoint() {
+  for (let i = 0; i < 100; i++) {
+    const x = rand(MARGIN, W - MARGIN), y = rand(MARGIN, H - MARGIN);
+    if (!circleHitsWall(x, y, ORG_RADIUS + 4)) return { x, y };
+  }
+  return { x: W / 2, y: H / 2 };
+}
+
+// ---- Navigation grid + BFS pathfinding -----------------------------------
+// Coarse grid over the floor; a cell is walkable if an organizer-sized circle
+// at its centre clears every wall and the boundary. Rebuilt for each game's layout.
+const CELL = 20;
+const COLS = Math.floor(W / CELL);
+const ROWS = Math.floor(H / CELL);
+let walkable;
+
+function buildGrid() {
+  walkable = [];
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      const x = c * CELL + CELL / 2, y = r * CELL + CELL / 2;
+      const inBounds = x >= ORG_RADIUS && x <= W - ORG_RADIUS &&
+                       y >= ORG_RADIUS && y <= H - ORG_RADIUS;
+      row.push(inBounds && !circleHitsWall(x, y, ORG_RADIUS + 2));
+    }
+    walkable.push(row);
+  }
+}
+
+function cellOf(x, y) {
+  return {
+    c: Math.max(0, Math.min(COLS - 1, Math.floor(x / CELL))),
+    r: Math.max(0, Math.min(ROWS - 1, Math.floor(y / CELL))),
+  };
+}
+
+// Closest walkable cell to (c,r), searched in expanding rings.
+function nearestWalkable(c, r) {
+  if (walkable[r][c]) return { c, r };
+  for (let rad = 1; rad < Math.max(COLS, ROWS); rad++) {
+    for (let dr = -rad; dr <= rad; dr++) {
+      for (let dc = -rad; dc <= rad; dc++) {
+        if (Math.abs(dr) !== rad && Math.abs(dc) !== rad) continue;  // ring edge only
+        const nc = c + dc, nr = r + dr;
+        if (nc >= 0 && nr >= 0 && nc < COLS && nr < ROWS && walkable[nr][nc]) return { c: nc, r: nr };
+      }
+    }
+  }
+  return null;
+}
+
+// Breadth-first path from (sx,sy) to (gx,gy); returns array of waypoint points or null.
+function findPath(sx, sy, gx, gy) {
+  let s = cellOf(sx, sy), g = cellOf(gx, gy);
+  s = nearestWalkable(s.c, s.r); g = nearestWalkable(g.c, g.r);
+  if (!s || !g) return null;
+
+  const idx = (c, r) => r * COLS + c;
+  const came = new Int32Array(ROWS * COLS).fill(-1);
+  const start = idx(s.c, s.r), goal = idx(g.c, g.r);
+  const queue = [start];
+  came[start] = start;
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  let head = 0, found = false;
+
+  while (head < queue.length) {
+    const cur = queue[head++];
+    if (cur === goal) { found = true; break; }
+    const cc = cur % COLS, cr = (cur - cc) / COLS;
+    for (const [dc, dr] of dirs) {
+      const nc = cc + dc, nr = cr + dr;
+      if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || !walkable[nr][nc]) continue;
+      const ni = idx(nc, nr);
+      if (came[ni] !== -1) continue;
+      came[ni] = cur;
+      queue.push(ni);
+    }
+  }
+  if (!found) return null;
+
+  const path = [];
+  let cur = goal;
+  while (cur !== came[cur]) {
+    const cc = cur % COLS, cr = (cur - cc) / COLS;
+    path.push({ x: cc * CELL + CELL / 2, y: cr * CELL + CELL / 2 });
+    cur = came[cur];
+  }
+  path.reverse();
+  return path;
+}
+
+// ---- Random wall layout --------------------------------------------------
+// Each game gets a fresh set of booth dividers. We generate a candidate, build
+// the nav grid, and keep it only if every walkable cell stays connected (no
+// sealed-off pockets). Falls back to the hand-authored layout if needed.
+function makeCandidateWalls() {
+  const walls = [];
+  const count = 6 + Math.floor(rand(0, 4));   // 6–9 dividers
+  let guard = 0;
+  while (walls.length < count && guard++ < 200) {
+    const vertical = rand(0, 1) < 0.5;
+    const w = vertical ? 26 : rand(120, 250);
+    const h = vertical ? rand(120, 250) : 26;
+    const x = rand(MARGIN + 10, W - MARGIN - 10 - w);
+    const y = rand(MARGIN + 10, H - MARGIN - 10 - h);
+    // keep a clear area around the player's central start
+    if (rectsOverlap(x, y, w, h, W / 2 - 70, H / 2 - 70, 140, 140)) continue;
+    walls.push({ x, y, w, h });
+  }
+  return walls;
+}
+
+// Flood-fill the walkable grid from the start; true if it reaches every walkable cell.
+function gridFullyConnected(sx, sy) {
+  let total = 0;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (walkable[r][c]) total++;
+  if (total === 0) return false;
+  const sc = cellOf(sx, sy);
+  const s = nearestWalkable(sc.c, sc.r);
+  if (!s) return false;
+  const idx = (c, r) => r * COLS + c;
+  const seen = new Uint8Array(ROWS * COLS);
+  const stack = [idx(s.c, s.r)];
+  seen[idx(s.c, s.r)] = 1;
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  let reached = 0;
+  while (stack.length) {
+    const cur = stack.pop();
+    reached++;
+    const cc = cur % COLS, cr = (cur - cc) / COLS;
+    for (const [dc, dr] of dirs) {
+      const nc = cc + dc, nr = cr + dr;
+      if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || !walkable[nr][nc]) continue;
+      const ni = idx(nc, nr);
+      if (seen[ni]) continue;
+      seen[ni] = 1;
+      stack.push(ni);
+    }
+  }
+  return reached === total;
+}
+
+// Pick a connected random layout (or fall back) and build its nav grid.
+function regenerateWalls() {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    WALLS = makeCandidateWalls();
+    buildGrid();
+    if (gridFullyConnected(W / 2, H / 2)) return;
+  }
+  WALLS = DEFAULT_WALLS.map(w => ({ ...w }));
+  buildGrid();
+}
+
+// Poster position clear of the player start, other posters, and walls.
+function spawnPosterPos(existing) {
+  for (let tries = 0; tries < 300; tries++) {
+    const x = rand(MARGIN, W - MARGIN - POSTER_W);
+    const y = rand(MARGIN, H - MARGIN - POSTER_H);
+    const cx = x + POSTER_W / 2, cy = y + POSTER_H / 2;
+    if (dist(cx, cy, W / 2, H / 2) < 110) continue;          // not on player start
+    if (existing.some(p => dist(cx, cy, p.x + POSTER_W/2, p.y + POSTER_H/2) < 130)) continue;
+    const hitsWall = WALLS.some(w => rectsOverlap(
+      x - WALL_PAD, y - WALL_PAD, POSTER_W + 2*WALL_PAD, POSTER_H + 2*WALL_PAD,
+      w.x, w.y, w.w, w.h));
+    if (hitsWall) continue;
+    return { x, y };
+  }
+  return { x: rand(MARGIN, W - MARGIN - POSTER_W), y: rand(MARGIN, H - MARGIN - POSTER_H) };
+}
+
+// ---- Game state ----------------------------------------------------------
+let game;
+
+// Roll a poster's look + worth together. Higher tiers are worth more points but
+// take proportionally longer to read (more risk). tier 0 = common, 1 = featured,
+// 2 = keynote. The visual variety (colour/accent/badge/lines) rides along with it.
+function rollPosterLook() {
+  const ci = Math.floor(rand(0, POSTER_COLORS.length));
+  const look = {
+    color: POSTER_COLORS[ci],
+    accent: POSTER_COLORS[(ci + 2 + Math.floor(rand(0, 3))) % POSTER_COLORS.length],
+    badge: POSTER_BADGES[Math.floor(rand(0, POSTER_BADGES.length))],
+    lines: 2 + Math.floor(rand(0, 2)),  // 2–3 text lines
+  };
+  const roll = rand(0, 1);
+  if      (roll < 0.07) { look.tier = 2; look.value = 5; look.readTime = 2.0; }   // keynote
+  else if (roll < 0.30) { look.tier = 1; look.value = 3; look.readTime = 1.3; }   // featured
+  else                  { look.tier = 0; look.value = 1; look.readTime = READ_TIME; }
+  return look;
+}
+
+function reset() {
+  regenerateWalls();   // fresh random booth layout + matching nav grid each game
+  const posters = [];
+  for (let i = 0; i < POSTER_COUNT; i++) {
+    const pos = spawnPosterPos(posters);
+    posters.push({ x: pos.x, y: pos.y, progress: 0, ...rollPosterLook() });
+  }
+
+  game = {
+    running: true,
+    score: 0,
+    elapsed: 0,
+    flash: 0,
+    shake: 0,
+    boost: 0,
+    newRecord: false,
+    combo: 0,
+    comboTimer: 0,
+    pops: [],
+    coffees: [],
+    coffeeTimer: rand(COFFEE_MIN_INTERVAL, COFFEE_MAX_INTERVAL),
+    player: { x: W / 2, y: H / 2 },
+    trail: [],
+    posters,
+    organizers: [
+      makeOrganizer(MARGIN + 20, MARGIN + 20),
+      makeOrganizer(W - MARGIN - 20, H - MARGIN - 20),
+    ],
+  };
+}
+
+function makeOrganizer(x, y) {
+  return {
+    x, y, target: freePoint(), chasing: false, ring: 0, bob: rand(0, Math.PI * 2),
+    path: [], pathStep: 0, repath: 0,
+  };
+}
+
+// A reinforcement organizer that appears well away from the player.
+function spawnOrganizerAwayFromPlayer() {
+  let best = freePoint();
+  for (let i = 0; i < 30; i++) {
+    const p = freePoint();
+    if (dist(p.x, p.y, game.player.x, game.player.y) > 300) { best = p; break; }
+    if (dist(p.x, p.y, game.player.x, game.player.y) >
+        dist(best.x, best.y, game.player.x, game.player.y)) best = p;
+  }
+  game.organizers.push(makeOrganizer(best.x, best.y));
+}
+
+// A coffee power-up at a free spot away from the player.
+function spawnCoffee() {
+  for (let i = 0; i < 40; i++) {
+    const p = freePoint();
+    if (dist(p.x, p.y, game.player.x, game.player.y) > 140) {
+      game.coffees.push({ x: p.x, y: p.y, life: COFFEE_LIFE });
+      return;
+    }
+  }
+  const p = freePoint();
+  game.coffees.push({ x: p.x, y: p.y, life: COFFEE_LIFE });
+}
+
+// ---- Update --------------------------------------------------------------
+function update(dt) {
+  if (!game.running) return;
+  game.elapsed += dt;
+
+  // --- Difficulty ramp -------------------------------------------------------
+  // Player tires very slightly over time; organizers get faster, see farther,
+  // and gain reinforcements as the score climbs. Tuned so ~10 is easy, ~100 is
+  // brutal, ~200 is essentially impossible.
+  const boosting = game.boost > 0;
+  const pSpeed = Math.max(150, PLAYER_SPEED - game.elapsed * 0.35) * (boosting ? BOOST_MULT : 1);
+  const ramp   = Math.min(game.score, 220);
+  const oSpeed = ORG_SPEED  + ramp * 0.6;    // 150 → 282 across the run
+  const oDetect = ORG_DETECT + ramp * 0.70;  // 200 → 321
+  game.detect = oDetect;                      // shared with draw() for the radius ring
+
+  // Reinforcements: a 3rd organizer at 40 posters, a 4th at 120.
+  const wantOrganizers = 2 + (game.score >= 40 ? 1 : 0) + (game.score >= 120 ? 1 : 0);
+  while (game.organizers.length < wantOrganizers) spawnOrganizerAwayFromPlayer();
+
+  // --- Input vector: keyboard (WASD) or the touch joystick; resolved per-axis ---
+  let ix = 0, iy = 0;
+  if (keys.has("a")) ix -= 1;
+  if (keys.has("d")) ix += 1;
+  if (keys.has("w")) iy -= 1;
+  if (keys.has("s")) iy += 1;
+  if (ix || iy) { const l = Math.hypot(ix, iy); ix /= l; iy /= l; }   // normalize keyboard
+  const tv = stickVector();
+  if (tv) { ix = tv.x; iy = tv.y; }                                   // touch takes over
+
+  const moving = ix !== 0 || iy !== 0;
+  if (moving) {
+    const step = pSpeed * dt;
+    const nx = game.player.x + ix * step;
+    const ny = game.player.y + iy * step;
+    if (!squareHitsWall(nx, game.player.y, PLAYER_SIZE)) game.player.x = nx;
+    if (!squareHitsWall(game.player.x, ny, PLAYER_SIZE)) game.player.y = ny;
+  }
+  const half = PLAYER_SIZE / 2;
+  game.player.x = Math.max(half, Math.min(W - half, game.player.x));
+  game.player.y = Math.max(half, Math.min(H - half, game.player.y));
+
+  // --- Movement trail: drop fading after-images while moving ---
+  if (moving) game.trail.push({ x: game.player.x, y: game.player.y, t: TRAIL_LIFE });
+  for (const s of game.trail) s.t -= dt;
+  game.trail = game.trail.filter(s => s.t > 0);
+
+  // --- Reading posters: you must linger for READ_TIME seconds ---
+  const px = game.player.x, py = game.player.y;
+  for (const p of game.posters) {
+    const overlap =
+      px + half > p.x && px - half < p.x + POSTER_W &&
+      py + half > p.y && py - half < p.y + POSTER_H;
+    if (overlap) {
+      p.progress += dt;
+      if (p.progress >= p.readTime) {
+        // Combo: chaining reads within the window grows the multiplier.
+        game.combo = game.comboTimer > 0 ? game.combo + 1 : 1;
+        game.comboTimer = COMBO_WINDOW;
+        const mult = Math.min(COMBO_MAX, game.combo);
+        const gain = p.value * mult;
+        game.score += gain;
+        if (game.score > highScore) {                // new record → persist immediately
+          highScore = game.score;
+          game.newRecord = true;
+          saveHighScore(highScore);
+        }
+        game.pops.push({
+          x: p.x + POSTER_W / 2, y: p.y, t: POP_LIFE,
+          text: "+" + gain, big: p.value > 1 || mult > 1,
+        });
+        const pos = spawnPosterPos(game.posters);   // respawn elsewhere → endless
+        p.x = pos.x; p.y = pos.y; p.progress = 0;
+        Object.assign(p, rollPosterLook());          // fresh look + worth
+      }
+    } else if (p.progress > 0) {
+      p.progress = Math.max(0, p.progress - dt * 2);  // decays if you step away
+    }
+  }
+
+  // --- Coffee power-ups: spawn occasionally, grant a temporary speed boost ---
+  game.coffeeTimer -= dt;
+  if (game.coffeeTimer <= 0) {
+    if (game.coffees.length < MAX_COFFEE) spawnCoffee();
+    game.coffeeTimer = rand(COFFEE_MIN_INTERVAL, COFFEE_MAX_INTERVAL);
+  }
+  for (const c of game.coffees) {
+    c.life -= dt;
+    if (dist(c.x, c.y, px, py) < half + COFFEE_R) { game.boost = BOOST_TIME; c.life = 0; }
+  }
+  game.coffees = game.coffees.filter(c => c.life > 0);
+  if (game.boost > 0) game.boost = Math.max(0, game.boost - dt);
+
+  // --- Combo: lapses if the next poster isn't read in time ---
+  if (game.comboTimer > 0) {
+    game.comboTimer -= dt;
+    if (game.comboTimer <= 0) { game.comboTimer = 0; game.combo = 0; }
+  }
+
+  // --- Score pops: float upward and fade ---
+  for (const pop of game.pops) pop.t -= dt;
+  game.pops = game.pops.filter(pop => pop.t > 0);
+
+  // --- Organizers (BFS pathfinding around walls) ---
+  for (const o of game.organizers) {
+    o.bob += dt * 6;
+    const d = dist(o.x, o.y, px, py);
+    const wasChasing = o.chasing;
+    o.chasing = d < oDetect && hasLineOfSight(o.x, o.y, px, py);  // no seeing through walls
+    if (o.chasing && (!wasChasing || o.ring <= 0)) o.ring = 0.6;  // ding! while in pursuit
+
+    const speed = o.chasing ? oSpeed : oSpeed * 0.55;
+    o.repath -= dt;
+
+    // (Re)plan. Chasing: refresh toward the moving player a few times a second.
+    // Patrolling: plan once per destination, pick a fresh one when the route is spent.
+    if (o.chasing) {
+      if (o.repath <= 0 || o.pathStep >= o.path.length) {
+        o.path = findPath(o.x, o.y, px, py) || [];
+        o.pathStep = 0;
+        o.repath = 0.3;
+      }
+    } else if (o.pathStep >= o.path.length) {
+      o.target = freePoint();
+      o.path = findPath(o.x, o.y, o.target.x, o.target.y) || [];
+      o.pathStep = 0;
+    }
+
+    // Follow the route: advance past waypoints we've reached, steer toward the next.
+    while (o.pathStep < o.path.length &&
+           dist(o.x, o.y, o.path[o.pathStep].x, o.path[o.pathStep].y) < 12) o.pathStep++;
+    let tx, ty;
+    if (o.pathStep < o.path.length) { tx = o.path[o.pathStep].x; ty = o.path[o.pathStep].y; }
+    else { tx = o.chasing ? px : o.x; ty = o.chasing ? py : o.y; }
+
+    const vx = tx - o.x, vy = ty - o.y;
+    const len = Math.hypot(vx, vy) || 1;
+    const sx = (vx / len) * speed * dt, sy = (vy / len) * speed * dt;
+    if (!circleHitsWall(o.x + sx, o.y, ORG_RADIUS)) o.x += sx;
+    if (!circleHitsWall(o.x, o.y + sy, ORG_RADIUS)) o.y += sy;
+
+    if (o.ring > 0) o.ring -= dt;
+    if (d < half + ORG_RADIUS) {                 // caught → game over
+      game.running = false;
+      game.flash = 1;
+      game.shake = 14;
+    }
+  }
+}
+
+// ---- Draw ----------------------------------------------------------------
+function draw() {
+  // Screen shake: offset the whole world by a decaying random jitter
+  ctx.save();
+  if (game.shake > 0) {
+    ctx.translate((Math.random() * 2 - 1) * game.shake, (Math.random() * 2 - 1) * game.shake);
+  }
+
+  // Floor: alternating carpet tiles for subtle texture
+  const TILE = 60;
+  for (let y = 0; y < H; y += TILE) {
+    for (let x = 0; x < W; x += TILE) {
+      const checker = ((x / TILE) + (y / TILE)) % 2 === 0;
+      ctx.fillStyle = checker ? "#f2efe6" : "#ece7da";
+      ctx.fillRect(x, y, TILE, TILE);
+    }
+  }
+  // Faint hall watermark behind everything
+  ctx.fillStyle = "rgba(120, 108, 80, 0.05)";
+  ctx.font = "bold 130px system-ui, sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("POSTER HALL", W / 2, H / 2);
+
+  // Walls (booth dividers)
+  for (const w of WALLS) {
+    ctx.fillStyle = "#8893a6";
+    roundRect(w.x, w.y, w.w, w.h, 5); ctx.fill();
+    ctx.fillStyle = "#69748a";  // darker edge stripe
+    roundRect(w.x, w.y, w.w, Math.min(8, w.h), 5); ctx.fill();
+  }
+
+  // Posters (read-glow + shadow + board + paper + title bar + text + badge)
+  for (const p of game.posters) {
+    const cx = p.x + POSTER_W / 2, cy = p.y + POSTER_H / 2;
+    const frac = Math.min(1, p.progress / p.readTime);
+
+    // Read-glow: warm halo that grows as you read
+    if (p.progress > 0) {
+      const rad = 24 + frac * 24;
+      const glow = ctx.createRadialGradient(cx, cy, 4, cx, cy, rad);
+      glow.addColorStop(0, `rgba(255, 236, 140, ${0.5 * frac})`);
+      glow.addColorStop(1, "rgba(255, 236, 140, 0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+    }
+
+    softShadow(cx, p.y + POSTER_H + 1, POSTER_W * 0.5, 4);
+
+    // Board + paper
+    ctx.fillStyle = p.color;
+    roundRect(p.x, p.y, POSTER_W, POSTER_H, 4); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    roundRect(p.x + 4, p.y + 5, POSTER_W - 8, POSTER_H - 10, 2); ctx.fill();
+
+    // Value highlight: gold frame for featured/keynote posters (keynote pulses)
+    if (p.tier > 0) {
+      ctx.strokeStyle = p.tier === 2 ? "#ffce3a" : "#e0b34a";
+      ctx.lineWidth = p.tier === 2 ? 3 : 2;
+      if (p.tier === 2) ctx.globalAlpha = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(game.elapsed * 5));
+      roundRect(p.x - 1.5, p.y - 1.5, POSTER_W + 3, POSTER_H + 3, 5); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Accent title bar
+    ctx.fillStyle = p.accent;
+    roundRect(p.x + 4, p.y + 5, POSTER_W - 8, 5, 2); ctx.fill();
+
+    // Body text lines
+    ctx.fillStyle = "rgba(90, 90, 100, 0.5)";
+    for (let i = 0; i < p.lines; i++) ctx.fillRect(p.x + 7, p.y + 15 + i * 5, POSTER_W - 14, 2);
+
+    // Category badge
+    ctx.fillStyle = p.accent;
+    ctx.font = "bold 8px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    ctx.fillText(p.badge, cx, p.y + POSTER_H - 4);
+
+    // Point-value tag (top-right) for posters worth more than 1
+    if (p.value > 1) {
+      ctx.fillStyle = p.tier === 2 ? "#ffce3a" : "#e0b34a";
+      ctx.beginPath(); ctx.arc(p.x + POSTER_W - 2, p.y + 1, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#3a2a00";
+      ctx.font = "bold 9px system-ui, sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(p.value, p.x + POSTER_W - 2, p.y + 1);
+    }
+
+    if (p.progress > 0) {
+      ctx.fillStyle = "rgba(0,0,0,0.15)";
+      ctx.fillRect(p.x, p.y - 8, POSTER_W, 4);
+      ctx.fillStyle = "#2e8b57";
+      ctx.fillRect(p.x, p.y - 8, POSTER_W * frac, 4);
+    }
+  }
+
+  // Coffee power-ups (warm glow + cup, blinking just before it vanishes)
+  for (const c of game.coffees) {
+    if (c.life < 3 && Math.floor(game.elapsed * 6) % 2 === 0) continue;
+    softShadow(c.x, c.y + COFFEE_R - 1, COFFEE_R * 0.8, 3);
+    const glow = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, COFFEE_R * 1.9);
+    glow.addColorStop(0, "rgba(255, 210, 120, 0.55)");
+    glow.addColorStop(1, "rgba(255, 210, 120, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(c.x, c.y, COFFEE_R * 1.9, 0, Math.PI * 2); ctx.fill();
+    ctx.font = (COFFEE_R * 2) + "px serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("☕", c.x, c.y);
+  }
+
+  // Organizers (detection radius + bell ring + figure)
+  for (const o of game.organizers) {
+    const detect = game.detect || ORG_DETECT;
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, detect, 0, Math.PI * 2);
+    ctx.fillStyle = o.chasing ? "rgba(226,90,70,0.10)" : "rgba(120,120,120,0.05)";
+    ctx.fill();
+
+    // Pulsing warning ring as the player nears the edge of detection
+    const pd = dist(o.x, o.y, game.player.x, game.player.y);
+    if (pd < detect * 1.3) {
+      const near = 1 - Math.min(1, pd / (detect * 1.3));   // 0 far → 1 right on top
+      const pulse = 0.5 + 0.5 * Math.sin(game.elapsed * 8);
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, detect, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(226, 90, 70, ${0.12 + 0.55 * near * pulse})`;
+      ctx.lineWidth = 1.5 + 3.5 * near * pulse;
+      ctx.stroke();
+    }
+
+    if (o.ring > 0) {
+      const t = 1 - o.ring / 0.6;
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, ORG_RADIUS + t * 34, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(226,90,70,${0.8 * (1 - t)})`;
+      ctx.lineWidth = 3; ctx.stroke();
+    }
+
+    const bob = Math.sin(o.bob) * 2;
+    softShadow(o.x, o.y + ORG_RADIUS - 1, ORG_RADIUS * 0.85, 4);
+    ctx.beginPath();
+    ctx.arc(o.x, o.y + bob, ORG_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = o.chasing ? "#d23b2c" : "#e0772f";
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.stroke();
+
+    ctx.font = "16px serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("🔔", o.x, o.y + bob - 1);
+  }
+
+  // Movement trail: fading after-images behind the player
+  const half = PLAYER_SIZE / 2;
+  for (const s of game.trail) {
+    const a = s.t / TRAIL_LIFE;
+    const sz = PLAYER_SIZE * (0.5 + 0.4 * a);
+    ctx.fillStyle = `rgba(58, 111, 240, ${0.22 * a})`;
+    roundRect(s.x - sz / 2, s.y - sz / 2, sz, sz, 4); ctx.fill();
+  }
+
+  // Player (with a warm aura while the coffee boost is active)
+  softShadow(game.player.x, game.player.y + half - 1, half * 0.95, 4);
+  if (game.boost > 0) {
+    const aura = ctx.createRadialGradient(
+      game.player.x, game.player.y, 4, game.player.x, game.player.y, PLAYER_SIZE);
+    aura.addColorStop(0, "rgba(240, 160, 60, 0.55)");
+    aura.addColorStop(1, "rgba(240, 160, 60, 0)");
+    ctx.fillStyle = aura;
+    ctx.beginPath(); ctx.arc(game.player.x, game.player.y, PLAYER_SIZE, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = "#3a6ff0";
+  roundRect(game.player.x - half, game.player.y - half, PLAYER_SIZE, PLAYER_SIZE, 5); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 2; ctx.stroke();
+
+  // Score pops: floating "+N" that rises and fades (gold when worth extra)
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const pop of game.pops) {
+    const a = pop.t / POP_LIFE;
+    ctx.font = (pop.big ? "bold 19px" : "bold 16px") + " system-ui, sans-serif";
+    ctx.fillStyle = pop.big ? `rgba(232, 170, 40, ${a})` : `rgba(46, 139, 87, ${a})`;
+    ctx.fillText(pop.text, pop.x, pop.y - (1 - a) * 30);
+  }
+
+  // End world-space drawing (screen shake) before HUD / overlays
+  ctx.restore();
+
+  // Capture flash (full screen, unshaken)
+  if (game.flash > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${game.flash * 0.7})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Score
+  ctx.fillStyle = "#2a3242";
+  ctx.font = "bold 18px system-ui, sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillText("Posters read: " + game.score, 14, 12);
+  ctx.fillStyle = "#6b7689";
+  ctx.font = "bold 14px system-ui, sans-serif";
+  ctx.fillText("Best: " + highScore, 14, 34);
+  if (game.boost > 0) {
+    ctx.fillStyle = "#c2701f";
+    ctx.font = "bold 15px system-ui, sans-serif";
+    ctx.fillText("☕ Speed boost! " + game.boost.toFixed(1) + "s", 14, 56);
+  }
+
+  // Combo multiplier (top-right) with a draining timer bar
+  const mult = Math.min(COMBO_MAX, game.combo);
+  if (mult > 1) {
+    ctx.textAlign = "right"; ctx.textBaseline = "top";
+    ctx.fillStyle = "#c2701f";
+    ctx.font = "bold 22px system-ui, sans-serif";
+    ctx.fillText("Combo ×" + mult, W - 14, 12);
+    const bw = 130;
+    ctx.fillStyle = "rgba(0,0,0,0.12)";
+    ctx.fillRect(W - 14 - bw, 40, bw, 5);
+    ctx.fillStyle = "#e8a000";
+    ctx.fillRect(W - 14 - bw, 40, bw * (game.comboTimer / COMBO_WINDOW), 5);
+  }
+
+  // Game over overlay
+  if (!game.running) {
+    ctx.fillStyle = "rgba(20,26,38,0.78)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = "bold 30px system-ui, sans-serif";
+    ctx.fillText("🔔 The talk is starting! 🔔", W / 2, H / 2 - 46);
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.fillText("An organizer herded you to the plenary.", W / 2, H / 2 - 6);
+    ctx.font = "bold 24px system-ui, sans-serif";
+    ctx.fillText("You read " + game.score + " poster" + (game.score === 1 ? "" : "s") + ".",
+                 W / 2, H / 2 + 28);
+    if (game.newRecord) {
+      ctx.fillStyle = "#ffce3a";
+      ctx.font = "bold 19px system-ui, sans-serif";
+      ctx.fillText("🏆 New best score!", W / 2, H / 2 + 62);
+    } else {
+      ctx.fillStyle = "#bcd0ec";
+      ctx.font = "18px system-ui, sans-serif";
+      ctx.fillText("Best: " + highScore, W / 2, H / 2 + 62);
+    }
+    ctx.font = "16px system-ui, sans-serif";
+    ctx.fillStyle = "#bcd0ec";
+    ctx.fillText(isTouch ? "Tap anywhere to attend the next poster session"
+                         : "Press  R  to attend the next poster session",
+                 W / 2, H / 2 + 96);
+  }
+
+  // On-screen joystick sits on top of everything (touch only)
+  drawJoystick();
+}
+
+// Soft contact shadow: a translucent flattened ellipse on the floor.
+function softShadow(cx, cy, rx, ry) {
+  ctx.fillStyle = "rgba(40, 35, 25, 0.16)";
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// On-screen joystick (touch only) — drawn in canvas pixels, mapped from the
+// client-space touch points via the canvas's current on-screen scale.
+function drawJoystick() {
+  if (!stick.active) return;
+  const rect = canvas.getBoundingClientRect();
+  const scX = W / rect.width, scY = H / rect.height;
+  const ox = (stick.ox - rect.left) * scX, oy = (stick.oy - rect.top) * scY;
+  let dx = stick.cx - stick.ox, dy = stick.cy - stick.oy;
+  const len = Math.hypot(dx, dy);
+  if (len > STICK_RADIUS) { dx *= STICK_RADIUS / len; dy *= STICK_RADIUS / len; }
+  const kx = ox + dx * scX, ky = oy + dy * scY;
+  const baseR = STICK_RADIUS * scX;
+
+  ctx.beginPath(); ctx.arc(ox, oy, baseR, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(40, 50, 70, 0.16)"; ctx.fill();
+  ctx.strokeStyle = "rgba(40, 50, 70, 0.30)"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(kx, ky, baseR * 0.5, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(58, 111, 240, 0.55)"; ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+// Rounded-rect path helper (fill/stroke applied by caller)
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// ---- Main loop -----------------------------------------------------------
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.1) dt = 0.1;   // clamp after tab-switches
+  update(dt);
+  // Visual effects decay even after game over (update() early-returns when stopped)
+  game.flash = Math.max(0, game.flash - dt * 2.2);
+  game.shake = Math.max(0, game.shake - dt * 32);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+reset();   // generates the wall layout, nav grid, and initial state
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
