@@ -76,16 +76,16 @@ const MARGIN        = 40;    // keep things off the very edge
 const WALL_PAD      = 6;     // clearance kept between posters/spawns and walls
 const TRAIL_LIFE    = 0.32;  // seconds a movement after-image lingers
 const POP_LIFE      = 0.8;   // seconds a "+1" score pop lasts
-const COFFEE_MIN_INTERVAL = 12;  // min seconds between coffee spawns
-const COFFEE_MAX_INTERVAL = 22;  // max seconds between coffee spawns
+const COFFEE_MIN_INTERVAL = 8;  // min seconds between coffee spawns
+const COFFEE_MAX_INTERVAL = 14;  // max seconds between coffee spawns
 const COFFEE_LIFE   = 12;    // seconds a coffee waits before vanishing
 const COFFEE_R      = 13;    // coffee size / pickup radius
 const BOOST_TIME    = 4.5;   // seconds of speed boost per coffee
 const BOOST_MULT    = 1.6;   // speed multiplier while boosted
 const MAX_COFFEE    = 2;     // max coffees on the floor at once
-const COMBO_WINDOW  = 3.5;   // seconds to read the next poster before the combo lapses
-const COMBO_MAX     = 5;     // combo multiplier cap
-const STICK_RADIUS  = 55;    // px (client) drag for full-speed on the touch joystick
+const COMBO_WINDOW  = 4.5;   // seconds to read the next poster before the combo lapses
+const COMBO_MAX     = 7;     // combo multiplier cap
+const STICK_RADIUS  = 45;    // px (client) drag for full-speed on the touch joystick
 const STICK_DEAD    = 6;     // px (client) dead zone before the joystick registers
 
 // ---- High score (persisted via localStorage) -----------------------------
@@ -117,13 +117,19 @@ let WALLS = DEFAULT_WALLS.map(w => ({ ...w }));
 
 // ---- Input ---------------------------------------------------------------
 const keys = new Set();
+let showIntro = true;   // brief explainer shown before the first game begins
+
+function dismissIntro() { showIntro = false; }
+
 addEventListener("keydown", e => {
+  if (showIntro) { dismissIntro(); e.preventDefault(); return; }   // any key begins
   const k = e.key.toLowerCase();
   keys.add(k);
   if (k === "r" && !game.running) reset();
   if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
 });
 addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+addEventListener("mousedown", dismissIntro);   // click also begins (desktop)
 
 // ---- Touch input (phones): a floating on-screen joystick ------------------
 const isTouch = window.matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
@@ -142,6 +148,7 @@ function stickVector() {
 }
 
 function onTouchStart(e) {
+  if (showIntro) { dismissIntro(); e.preventDefault(); return; }  // tap to begin
   if (!game.running) { reset(); e.preventDefault(); return; }   // tap to restart
   if (!stick.active) {
     const t = e.changedTouches[0];
@@ -479,7 +486,7 @@ function spawnCoffee() {
 
 // ---- Update --------------------------------------------------------------
 function update(dt) {
-  if (!game.running) return;
+  if (showIntro || !game.running) return;
   game.elapsed += dt;
 
   // --- Difficulty ramp -------------------------------------------------------
@@ -804,7 +811,7 @@ function draw() {
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   for (const pop of game.pops) {
     const a = pop.t / POP_LIFE;
-    ctx.font = (pop.big ? "bold 19px" : "bold 16px") + " system-ui, sans-serif";
+    ctx.font = (pop.big ? "bold 24px" : "bold 19px") + " system-ui, sans-serif";
     ctx.fillStyle = pop.big ? `rgba(232, 170, 40, ${a})` : `rgba(46, 139, 87, ${a})`;
     ctx.fillText(pop.text, pop.x, pop.y - (1 - a) * 30);
   }
@@ -877,6 +884,9 @@ function draw() {
 
   // On-screen joystick sits on top of everything (touch only)
   drawJoystick();
+
+  // Intro / explainer card (first launch only)
+  drawIntro();
 }
 
 // Soft contact shadow: a translucent flattened ellipse on the floor.
@@ -906,6 +916,39 @@ function drawJoystick() {
   ctx.beginPath(); ctx.arc(kx, ky, baseR * 0.5, 0, Math.PI * 2);
   ctx.fillStyle = "rgba(58, 111, 240, 0.28)"; ctx.fill();
   ctx.strokeStyle = "rgba(255, 255, 255, 0.35)"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+// Intro explainer shown once, before the first game starts.
+function drawIntro() {
+  if (!showIntro) return;
+  ctx.fillStyle = "rgba(20, 26, 38, 0.82)";
+  ctx.fillRect(0, 0, W, H);
+
+  const pw = 640, ph = 330, px = (W - pw) / 2, py = (H - ph) / 2;
+  ctx.fillStyle = "rgba(28, 36, 52, 0.97)";
+  roundRect(px, py, pw, ph, 16); ctx.fill();
+  ctx.strokeStyle = "rgba(120, 150, 200, 0.35)"; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#e8edf4";
+  ctx.font = "bold 29px system-ui, sans-serif";
+  ctx.fillText("🎟️  Welcome to the RISC-V Summit!", W / 2, py + 62);
+
+  ctx.fillStyle = "#c7d3e6";
+  ctx.font = "19px system-ui, sans-serif";
+  const lines = [
+    "The poster session is open — wander the hall and",
+    "read as many posters as you can.",
+    "",
+    "But watch out for the organizers with bells 🔔:",
+    "they want to herd you into the plenary for the next talk.",
+  ];
+  let ty = py + 128;
+  for (const line of lines) { ctx.fillText(line, W / 2, ty); ty += 30; }
+
+  ctx.fillStyle = "#9fb6d6";
+  ctx.font = "bold 18px system-ui, sans-serif";
+  ctx.fillText(isTouch ? "Tap to begin" : "Press any key to begin", W / 2, py + ph - 38);
 }
 
 // Rounded-rect path helper (fill/stroke applied by caller)
