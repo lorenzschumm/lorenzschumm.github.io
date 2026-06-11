@@ -26,13 +26,23 @@
     background: #f2efe6;
     border-radius: 8px;
     box-shadow: 0 10px 30px rgba(0,0,0,.45);
-    max-width: 100%;                        /* scale down to fit phone screens */
-    max-height: 82vh;
+    /* Fit within both dimensions; the max-width/max-height pair preserves the
+       canvas's intrinsic aspect ratio in either orientation. */
+    max-width: 96vw;
+    max-height: 80vh;
     touch-action: none;                     /* we handle touches ourselves */
   }
   @media (max-width: 700px) {
     h1 { font-size: 17px; }
     p.hint { font-size: 11px; padding: 0 10px; text-align: center; }
+  }
+  /* Landscape phones: short screens, so trim the header and let the canvas
+     take the height — keeps the whole board on-screen without clipping. */
+  @media (orientation: landscape) and (max-height: 560px) {
+    body { gap: 3px; }
+    h1 { font-size: 13px; }
+    p.hint { font-size: 10px; padding: 0 10px; text-align: center; }
+    canvas { max-width: 100vw; max-height: 86vh; }
   }
 </style>
 </head>
@@ -891,11 +901,11 @@ function drawJoystick() {
   const baseR = STICK_RADIUS * scX;
 
   ctx.beginPath(); ctx.arc(ox, oy, baseR, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(40, 50, 70, 0.16)"; ctx.fill();
-  ctx.strokeStyle = "rgba(40, 50, 70, 0.30)"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = "rgba(40, 50, 70, 0.07)"; ctx.fill();
+  ctx.strokeStyle = "rgba(40, 50, 70, 0.16)"; ctx.lineWidth = 2; ctx.stroke();
   ctx.beginPath(); ctx.arc(kx, ky, baseR * 0.5, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(58, 111, 240, 0.55)"; ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = "rgba(58, 111, 240, 0.28)"; ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.35)"; ctx.lineWidth = 2; ctx.stroke();
 }
 
 // Rounded-rect path helper (fill/stroke applied by caller)
