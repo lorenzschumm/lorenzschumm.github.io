@@ -1,2 +1,109 @@
-Hello there!
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lorenz Schumm</title>
+<style>
+  :root {
+    --bg: #fafaf7;
+    --fg: #1d1d1f;
+    --line: rgba(0, 0, 0, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141416; --fg: #ececec; --line: rgba(255, 255, 255, .14); }
+  }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
 
+  /* ---- The joke: a subway-surfer-style "gameplay" subscreen -------------- */
+  /* Desktop: a phone-shaped picture-in-picture box in the corner. */
+  #subway {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    height: min(480px, 62vh);
+    aspect-ratio: 9 / 16;
+    border-radius: 14px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+    z-index: 10;
+  }
+  #subway[hidden], #subway-open[hidden] { display: none; }
+  #subway canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;           /* low-res render, chunky upscale */
+    cursor: pointer;
+  }
+  #subway-close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .45);
+    color: #fff;
+    font-size: 14px;
+    line-height: 26px;
+    cursor: pointer;
+  }
+  #subway-open {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    z-index: 10;
+  }
+
+  /* Phones: the classic split-screen — content on top, gameplay below. */
+  @media (max-width: 700px) {
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+    main { flex: 1 1 auto; overflow-y: auto; width: 100%; box-sizing: border-box; }
+    #subway {
+      position: relative;
+      right: auto;
+      bottom: auto;
+      flex: 0 0 45%;
+      height: auto;
+      aspect-ratio: auto;
+      border-radius: 0;
+      border-top: 1px solid var(--line);
+      box-shadow: none;
+    }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p>Hello there!</p>
+</main>
+
+<aside id="subway">
+  <canvas id="subway-canvas" width="180" height="320" role="img"
+          aria-label="Decorative endless-runner gameplay, playing itself. Click to pause."></canvas>
+  <button id="subway-close" type="button" aria-label="Hide the gameplay">✕</button>
+</aside>
+<button id="subway-open" type="button" hidden>🚇 bring back the gameplay</button>
+
+<script src="subway.js" defer></script>
+</body>
+</html>
