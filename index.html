@@ -4,14 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lorenz Schumm</title>
+<script>
+  // Apply a saved dark theme before first paint, so there's no white flash.
+  try { if (localStorage.getItem("theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) { /* storage unavailable */ }
+</script>
 <style>
   :root {
-    --bg: #fafaf7;
-    --fg: #1d1d1f;
-    --line: rgba(0, 0, 0, .12);
+    --bg: #ffffff;
+    --fg: #000000;
+    --line: rgba(0, 0, 0, .15);
+    color-scheme: light;
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #141416; --fg: #ececec; --line: rgba(255, 255, 255, .14); }
+  :root[data-theme="dark"] {
+    --bg: #111113;
+    --fg: #ececec;
+    --line: rgba(255, 255, 255, .18);
+    color-scheme: dark;
   }
   html, body { margin: 0; }
   body {
@@ -20,9 +28,28 @@
     font-family: system-ui, "Segoe UI", Roboto, sans-serif;
     line-height: 1.5;
   }
-  main { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px 16px 24px; }
 
-  /* ---- The joke: a subway-surfer-style "gameplay" subscreen -------------- */
+  /* ---- Mode toggles ------------------------------------------------------ */
+  .modes { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .modes button {
+    font: inherit;
+    font-size: 14px;
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .modes button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  #brainrot-toggle[aria-pressed="true"] {
+    background: linear-gradient(90deg, #ff4fa3, #ffcc33, #4fd1ff);
+    color: #000;
+    border-color: transparent;
+  }
+
+  /* ---- Brainrot mode: a subway-surfer-style "gameplay" subscreen --------- */
   /* Desktop: a phone-shaped picture-in-picture box in the corner. */
   #subway {
     position: fixed;
@@ -36,7 +63,7 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
     z-index: 10;
   }
-  #subway[hidden], #subway-open[hidden] { display: none; }
+  #subway[hidden] { display: none; }
   #subway canvas {
     display: block;
     width: 100%;
@@ -57,20 +84,6 @@
     font-size: 14px;
     line-height: 26px;
     cursor: pointer;
-  }
-  #subway-open {
-    position: fixed;
-    right: 16px;
-    bottom: 16px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    padding: 6px 12px;
-    background: var(--bg);
-    color: var(--fg);
-    font: inherit;
-    font-size: 14px;
-    cursor: pointer;
-    z-index: 10;
   }
 
   /* Phones: the classic split-screen — content on top, gameplay below. */
@@ -94,16 +107,54 @@
 </head>
 <body>
 <main>
+  <nav class="modes" aria-label="Display modes">
+    <button id="dark-toggle" type="button" aria-pressed="false">🌙 Dark mode</button>
+    <button id="brainrot-toggle" type="button" aria-pressed="false">🧠 Brainrot mode</button>
+  </nav>
   <p>Hello there!</p>
 </main>
 
-<aside id="subway">
+<aside id="subway" hidden>
   <canvas id="subway-canvas" width="180" height="320" role="img"
           aria-label="Decorative endless-runner gameplay, playing itself. Click to pause."></canvas>
-  <button id="subway-close" type="button" aria-label="Hide the gameplay">✕</button>
+  <button id="subway-close" type="button" aria-label="Turn off brainrot mode">✕</button>
 </aside>
-<button id="subway-open" type="button" hidden>🚇 bring back the gameplay</button>
 
-<script src="subway.js" defer></script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const darkBtn = document.getElementById("dark-toggle");
+  const brainrotBtn = document.getElementById("brainrot-toggle");
+  const subway = document.getElementById("subway");
+  const save = (key, value) => { try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable */ } };
+  const load = key => { try { return localStorage.getItem(key); } catch (e) { return null; } };
+
+  function setDark(on) {
+    if (on) root.dataset.theme = "dark"; else delete root.dataset.theme;
+    darkBtn.setAttribute("aria-pressed", String(on));
+    save("theme", on ? "dark" : "light");
+  }
+
+  let gameLoaded = false;
+  function setBrainrot(on) {
+    subway.hidden = !on;
+    brainrotBtn.setAttribute("aria-pressed", String(on));
+    save("brainrot", on ? "1" : "0");
+    // The game is only downloaded the first time brainrot mode is switched on.
+    if (on && !gameLoaded) {
+      gameLoaded = true;
+      const script = document.createElement("script");
+      script.src = "subway.js";
+      document.body.append(script);
+    }
+  }
+
+  darkBtn.addEventListener("click", () => setDark(root.dataset.theme !== "dark"));
+  brainrotBtn.addEventListener("click", () => setBrainrot(subway.hidden));
+  document.getElementById("subway-close").addEventListener("click", () => setBrainrot(false));
+  darkBtn.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
+  setBrainrot(load("brainrot") === "1");
+})();
+</script>
 </body>
 </html>

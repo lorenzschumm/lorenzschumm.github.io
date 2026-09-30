@@ -13,8 +13,6 @@
 (() => {
 const aside    = document.getElementById("subway");
 const canvas   = document.getElementById("subway-canvas");
-const closeBtn = document.getElementById("subway-close");
-const openBtn  = document.getElementById("subway-open");
 const ctx = canvas.getContext("2d");
 
 // ---- Tunable constants ---------------------------------------------------
@@ -38,8 +36,7 @@ const PLATFORM_H = 0.9;
 const DAY_CYCLE  = 120;    // seconds for a full day → sunset → night → dawn
 const MAGNET_T   = 10;     // seconds a coin magnet lasts
 const BOOST_T    = 15;     // seconds a 2x score boost lasts
-const STORAGE_KEY = "subway-hidden";
-const BEST_KEY    = "subway-best";
+const BEST_KEY   = "subway-best";
 
 // ---- Palette ---------------------------------------------------------------
 const GROUND   = [128, 124, 116];
@@ -2269,17 +2266,7 @@ function setRunning() {
   if (!run && !aside.hidden) draw();
 }
 
-function setHidden(hidden) {
-  aside.hidden = hidden;
-  openBtn.hidden = !hidden;
-  try { localStorage.setItem(STORAGE_KEY, hidden ? "1" : "0"); } catch (e) { /* storage unavailable */ }
-  if (!hidden) resize();
-  setRunning();
-}
-
 canvas.addEventListener("click", () => { paused = !paused; setRunning(); });
-closeBtn.addEventListener("click", () => setHidden(true));
-openBtn.addEventListener("click", () => setHidden(false));
 document.addEventListener("visibilitychange", setRunning);
 new ResizeObserver(() => { resize(); if (!rafId && !aside.hidden) draw(); }).observe(canvas);
 new IntersectionObserver(entries => {
@@ -2287,9 +2274,13 @@ new IntersectionObserver(entries => {
   setRunning();
 }).observe(canvas);
 
-let startHidden = false;
-try { startHidden = localStorage.getItem(STORAGE_KEY) === "1"; } catch (e) { /* storage unavailable */ }
+// The page shows and hides the subscreen (brainrot mode) via its `hidden` attribute.
+new MutationObserver(() => {
+  if (!aside.hidden) resize();
+  setRunning();
+}).observe(aside, { attributes: true, attributeFilter: ["hidden"] });
+
 resize();
 reset();
-setHidden(startHidden);
+setRunning();
 })();
